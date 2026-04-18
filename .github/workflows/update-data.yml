@@ -2,30 +2,50 @@ name: Update Index Data
 
 on:
   schedule:
-    - cron: '0 9 * * 1'  # 每周一上午9点自动更新
-  workflow_dispatch:      # 支持手动点击更新
+    - cron: '0 9 * * 1'  # 每周一上午9点
+  workflow_dispatch:
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v3
-      
+      - name: Checkout repository
+        uses: actions/checkout@v4  # 升级到v4，解决Node.js警告
+        
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5  # 升级到v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
+          cache: 'pip'  # 启用缓存加速
           
       - name: Install dependencies
-        run: pip install akshare pandas
-        
+        run: |
+          pip install --upgrade pip
+          pip install akshare pandas
+          
+      - name: Create initial data files if not exist
+        run: |
+          touch data.json
+          touch data-compact.json
+          touch data-merged.json
+          
       - name: Fetch index data
         run: python fetch_data.py
+        continue-on-error: false  # 如果失败则停止
+        timeout-minutes: 10  # 超时10分钟
         
-      - name: Commit and push
+      - name: Check if files were created
+        run: |
+          ls -la *.json
+          cat data.json | head -20  # 显示前20行确认数据
+          
+      - name: Commit and push changes
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add -A
-          git commit -m "Update index data $(date +%Y-%m-%d)" || exit 0
-          git push
+          git diff --cached --quiet && echo "No changes to commit" || (
+            git commit -m "Update index data $(date +%Y-%m-%d-%H:%M:%S) [skip ci]"
+            git push
+          )
