@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-指数基金数据自动获取脚本
-数据源：中证指数有限公司（通过AKShare）
-"""
 
 import akshare as ak
 import pandas as pd
 import json
+import sys
 from datetime import datetime
 
-# 五大指数配置
 INDICES = {
     'hs300': {'code': '000300', 'name': '沪深300'},
     'zz500': {'code': '000905', 'name': '中证500'},
@@ -19,77 +15,107 @@ INDICES = {
     'cyb': {'code': '399006', 'name': '创业板指'}
 }
 
-def main():
-    print(f"⏰ 开始更新数据：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+def get_index_data_safe(index_key, index_info):
+    """
+    安全获取数据，带重试和错误处理
+    """
+    print(f"\n📊 获取 {index_info['name']} ({index_info['code']})...")
     
-    result = {}
-    
-    for key, info in INDICES.items():
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            print(f"\n📊 获取 {info['name']} ({info['code']})...")
-            df = ak.index_stock_cons_weight_csindex(info['code'])
+            # 方法1：使用AKShare官方接口
+            df = ak.index_stock_cons_weight_csindex(symbol=index_info['code'])
+            
+            if df is None or df.empty:
+                raise ValueError("Empty dataframe returned")
             
             # 数据清洗
             df = df[['成分券代码', '成分券名称', '权重']].copy()
             df.columns = ['code', 'name', 'weight']
             df['weight'] = pd.to_numeric(df['weight'], errors='coerce')
+            df = df.dropna(subset=['code', 'weight'])
             
-            # 转换为记录
             records = df.to_dict('records')
-            result[key] = records
             
-            # 显示前3大权重
-            top3 = sorted(records, key=lambda x: x['weight'], reverse=True)[:3]
-            print(f"   ✅ {len(records)}只股票")
-            for i, stock in enumerate(top3, 1):
-                print(f"      {i}. {stock['name']}: {stock['weight']:.2f}%")
-                
+            if len(records) == 0:
+                raise ValueError("No valid records")
+            
+            print(f"   ✅ 成功: {len(records)}只股票")
+            return records
+            
         except Exception as e:
-            print(f"   ❌ 错误：{e}")
-            result[key] = []  # 失败时返回空数组
+            print(f"   ⚠️ 尝试{attempt+1}/{max_retries}失败: {str(e)[:100]}")
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(2)  # 等待2秒后重试
+            else:
+                print(f"   ❌ 最终失败，使用空数据")
+                return []
+
+def main():
+    print(f"⏰ 开始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # 保存为JSON
-    with open('data.json', 'w', encoding='utf-8') as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+    result = {}
+    success_count = 0
     
-    # 保存紧凑版（给iPhone用）
-    with open('data-compact.json', 'w', encoding='utf-8') as f:
-        json.dump(result, f, ensure_ascii=False, separators=(',', ':'))
+    for key, info in INDICES.items():
+        data = get_index_data_safe(key, info)
+        result[key] = data
+        if len(data) > 0:
+            success_count += 1
     
-    # 保存合并版（去重）
-    merge_data(result)
+    # 即使部分失败也保存数据
+    print(f"\n📊 成功率: {success_count}/{len(INDICES)}个指数")
     
-    print(f"\n✅ 完成！文件已更新")
-    print(f"   📄 data.json - 完整格式")
-    print(f"   📱 data-compact.json - iPhone紧凑格式")
-    print(f"   📊 data-merged.json - 去重合并且排序")
+    # 保存为JSON（确保文件存在）
+    try:
+        with open('data.json', 'w', encoding='utf-8') as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        print("✅ 已保存 data.json")
+        
+        # 紧凑版
+        with open('data-compact.json', 'w', encoding='utf-8') as f:
+            json.dump(result, f, ensure_ascii=False, separators=(',', ':'))
+        print("✅ 已保存 data-compact.json")
+        
+        # 合并版
+        merge_data(result)
+        
+    except Exception as e:
+        print(f"❌ 保存文件失败: {e}")
+        sys.exit(1)  # 退出码1表示失败
+    
+    print("✅ 全部完成!")
 
 def merge_data(all_data):
-    """合并所有指数数据，去重"""
-    stock_dict = {}
-    
-    for index_key, stocks in all_data.items():
-        index_name = INDICES[index_key]['name']
-        for stock in stocks:
-            code = stock['code']
-            if code not in stock_dict:
-                stock_dict[code] = {
-                    'code': code,
-                    'name': stock['name'],
-                    'hs300': 0, 'zz500': 0, 'a500': 0, 'sz180': 0, 'cyb': 0,
-                    'indices': []
-                }
-            stock_dict[code][index_key] = stock['weight']
-            stock_dict[code]['indices'].append(index_name)
-    
-    # 转换为列表，按沪深300权重排序
-    merged_list = list(stock_dict.values())
-    merged_list.sort(key=lambda x: x['hs300'], reverse=True)
-    
-    with open('data-merged.json', 'w', encoding='utf-8') as f:
-        json.dump(merged_list, f, ensure_ascii=False, indent=2)
-    
-    print(f"   📊 合并后共 {len(merged_list)} 只不重复股票")
+    """合并去重"""
+    try:
+        stock_dict = {}
+        
+        for index_key, stocks in all_data.items():
+            index_name = INDICES[index_key]['name']
+            for stock in stocks:
+                code = stock['code']
+                if code not in stock_dict:
+                    stock_dict[code] = {
+                        'code': code, 'name': stock['name'],
+                        'hs300': 0, 'zz500': 0, 'a500': 0, 'sz180': 0, 'cyb': 0,
+                        'indices': []
+                    }
+                stock_dict[code][index_key] = stock['weight']
+                stock_dict[code]['indices'].append(index_name)
+        
+        merged = list(stock_dict.values())
+        merged.sort(key=lambda x: x['hs300'], reverse=True)
+        
+        with open('data-merged.json', 'w', encoding='utf-8') as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
+        
+        print(f"✅ 已保存 data-merged.json ({len(merged)}只不重复股票)")
+        
+    except Exception as e:
+        print(f"⚠️ 合并数据失败: {e}")
 
 if __name__ == '__main__':
     main()
